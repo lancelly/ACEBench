@@ -88,7 +88,11 @@ class APIUSER():
         elif "qwen" in self.model_name:
             api_key = os.getenv("QWEN_API_KEY")
             base_url = os.getenv("QWEN_BASE_URL")
-            
+        elif "kimi" in self.model_name.lower():
+            api_key = os.getenv("KIMI_API_KEY")
+            base_url = os.getenv("KIMI_BASE_URL")
+        else:
+            raise ValueError(f"Model {self.model_name} is not supported")
         self.client = OpenAI(base_url=base_url, api_key=api_key)
         self.model_name = model_name
         self.temperature = temperature

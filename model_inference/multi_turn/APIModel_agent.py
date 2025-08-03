@@ -55,6 +55,9 @@ class APIAgent_turn():
         elif "qwen" in self.model_name:
             api_key = os.getenv("QWEN_API_KEY")
             base_url = os.getenv("QWEN_BASE_URL")
+        elif "kimi" in self.model_name.lower():
+            api_key = os.getenv("KIMI_API_KEY")
+            base_url = os.getenv("KIMI_BASE_URL")
         else:
             raise ValueError(f"Unknown model name: {self.model_name}")
 

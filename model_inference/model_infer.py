@@ -157,8 +157,9 @@ SYSTEM_PROMPT_FOR_SPECIAL_DATA_EN = """You are an AI assistant with the role nam
    Note: The above steps have a priority order. You need to first determine whether scenario (1) applies. If it does, output according to the requirements in (1). Pay attention to distinguishing between scenarios (1) and (2)."""
 class Kimi(object):
     def __init__(self, model_name, model_path=None, temperature=0.001, top_p=1, max_tokens=1000, language="zh") -> None:
-        api_key = "tensorrt_llm"
-        base_url = "http://localhost:8000/v1"
+        # set the environment variable for the api key and base url
+        api_key = os.getenv("KIMI_API_KEY")
+        base_url = os.getenv("KIMI_BASE_URL")
         self.model_name = model_name
         self.client = OpenAI(api_key=api_key, timeout=1000, max_retries=1, base_url=base_url)
         self.tokenizer = self.initialize_tokenizer()
