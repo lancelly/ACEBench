@@ -6,6 +6,7 @@ from openai import OpenAI
 import google.generativeai as genai
 from vllm import LLM, SamplingParams
 import time
+import re
 
 
 def get_free_gpu(use_gpu_num):
@@ -143,30 +144,139 @@ class Gemini(object):
         result = self.request_gemini(system_prompt=system_prompt, messages=messages)
         return result
 
+
+SYSTEM_PROMPT_FOR_SPECIAL_DATA_EN = """You are an AI assistant with the role name "assistant". Based on the provided API specifications and conversation history from steps 1 to t, generate the API requests that the assistant should call in step t+1. Below are two specific scenarios:
+1. When the information provided by the user is clear and unambiguous, and the problem can be resolved using the list of candidate functions:
+   - If the API parameter description does not specify the required format for the value, use the user's original text for the parameter value.
+   - When multiple tools in the candidate list can satisfy the user's needs, output all API requests.
+
+2. When the information provided by the user is unclear, incomplete, or incorrect, or the user's question exceeds the capabilities of the provided functions, you need to clearly point out these issues. The following is your strategy:
+   (1) If the user's instructions include the key details required to call the API, but the type or form of the parameter values does not match the API's definitions, ask in-depth questions to clarify and correct the details. The output format should be: ["There is incorrect value (value) for the parameters (key) in the conversation history."]
+   (2) If the user's instructions lack the key details required by the API, ask questions to obtain the necessary information. The output format should be: ["Missing necessary parameters (key1, key2, ...) for the api (ApiName)"], replacing key1, key2 with the names of the missing parameters and ApiName with the actual API name.
+   (3) If the user's request exceeds the current capabilities of your APIs, inform them that you cannot fulfill the request. The output format should be: ["Due to the limitations of the function, I cannot solve this problem."]
+   Note: The above steps have a priority order. You need to first determine whether scenario (1) applies. If it does, output according to the requirements in (1). Pay attention to distinguishing between scenarios (1) and (2)."""
 class Kimi(object):
     def __init__(self, model_name, model_path=None, temperature=0.001, top_p=1, max_tokens=1000, language="zh") -> None:
-        api_key = os.getenv("KIMI_API_KEY")
-        base_url = "https://api.moonshot.cn/v1"
+        api_key = "tensorrt_llm"
+        base_url = "http://localhost:8000/v1"
         self.model_name = model_name
         self.client = OpenAI(api_key=api_key, timeout=1000, max_retries=1, base_url=base_url)
+        self.tokenizer = self.initialize_tokenizer()
 
-    def creat_message(self, system_prompt=None, user_prompt=None):
+    def initialize_tokenizer(self):
+        from transformers import AutoTokenizer
+        tokenizer = AutoTokenizer.from_pretrained(self.model_name, trust_remote_code=True)
+        return tokenizer
+    
+    # ref: https://huggingface.co/moonshotai/Kimi-K2-Instruct/blob/main/docs/tool_call_guidance.md
+    def extract_tool_call_info(self, tool_call_rsp: str):
+        if '<|tool_calls_section_begin|>' not in tool_call_rsp:
+            # No tool calls
+            return []
+        pattern = r"<\|tool_calls_section_begin\|>(.*?)<\|tool_calls_section_end\|>"
+
+        tool_calls_sections = re.findall(pattern, tool_call_rsp, re.DOTALL)
+
+        # Extract multiple tool calls
+        func_call_pattern = r"<\|tool_call_begin\|>\s*(?P<tool_call_id>[\w\.]+:\d+)\s*<\|tool_call_argument_begin\|>\s*(?P<function_arguments>.*?)\s*<\|tool_call_end\|>"
+        tool_calls = []
+        for match in re.findall(func_call_pattern, tool_calls_sections[0], re.DOTALL):
+            function_id, function_args = match
+            # function_id: functions.get_weather:0
+            function_name = function_id.split('.')[1].split(':')[0]
+            tool_calls.append(
+                {
+                    "id": function_id,
+                    "type": "function",
+                    "function": {
+                        "name": function_name,
+                        "arguments": function_args
+                    }
+                }
+            )  
+        print(f"tool_calls: {tool_calls}\n")
+        return tool_calls
+
+    def convert_tool_calls_to_api_format(self, tool_call_rsp: str) -> str:
+        import json
+        
+        tool_calls = self.extract_tool_call_info(tool_call_rsp)
+        
+        if not tool_calls:
+            return None
+        
+        api_calls = []
+        
+        for tool_call in tool_calls:
+            function_name = tool_call["function"]["name"]
+            arguments_str = tool_call["function"]["arguments"]
+            
+            try:
+                if arguments_str.strip():
+                    arguments = json.loads(arguments_str)
+                else:
+                    arguments = {}
+            except json.JSONDecodeError:
+                arguments = {}
+                print(f"Warning: Failed to parse arguments for {function_name}: {arguments_str}")
+            
+            param_parts = []
+            for key, value in arguments.items():
+                if isinstance(value, str):
+                    param_parts.append(f"{key}='{value}'")
+                elif isinstance(value, (int, float, bool)):
+                    param_parts.append(f"{key}={value}")
+                elif isinstance(value, (list, dict)):
+                    param_parts.append(f"{key}={repr(value)}")
+                else:
+                    param_parts.append(f"{key}='{str(value)}'")
+            
+            if param_parts:
+                api_call = f"{function_name}({', '.join(param_parts)})"
+            else:
+                api_call = f"{function_name}()"
+            
+            api_calls.append(api_call)
+        
+        if len(api_calls) == 1:
+            return f"[{api_calls[0]}]"
+        else:
+            return f"[{', '.join(api_calls)}]"
+
+
+    def creat_message(self, system_prompt=None, user_prompt=None, functions=None):
         messages = []
         if system_prompt:
             messages = [{"role": "system", "content": system_prompt}]
         if user_prompt:
             messages.append({"role": "user", "content": user_prompt})
-        return messages
+        text = self.tokenizer.apply_chat_template(
+                messages,
+                tools=functions,
+                tokenize=False,
+                add_generation_prompt=True,
+            )
+        return text
 
-    def inference(self, system_prompt, user_prompt):
-        messages = self.creat_message(system_prompt=system_prompt, user_prompt=user_prompt)
-        response = self.client.chat.completions.create(  
-            model = self.model_name,
-            messages=messages,
+    def inference(self, system_prompt, user_prompt, functions, is_special_en=False):
+        if is_special_en:
+            system_prompt = SYSTEM_PROMPT_FOR_SPECIAL_DATA_EN
+        else:
+            # Do not use ace system prompt since it specifed the tool call format
+            system_prompt = None
+        messages = self.creat_message(system_prompt=system_prompt, user_prompt=user_prompt, functions=functions)
+        response = self.client.completions.create(  
+            model="Kimi-K2-Instruct",
+            prompt=messages,
             max_tokens=1024,
-            temperature=0.0
+            temperature=0.0,
         )
-        return response.choices[0].message.content
+        transformed_response = self.convert_tool_calls_to_api_format(response.choices[0].text)
+        if transformed_response is None:
+            # If the response is not a tool call, return the original response
+            return response.choices[0].text
+        else:
+            return transformed_response
 
 
 model_dict = {}
