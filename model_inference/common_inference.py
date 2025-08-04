@@ -83,10 +83,6 @@ class CommonInference(BaseHandler):
                 system_prompt = SYSTEM_PROMPT_FOR_NORMAL_DATA_EN.format(time=time, function=functions)
             user_prompt = USER_PROMPT_EN.format(question=question)
 
-        if "kimi" in self.model_name.lower():
-            is_special_en = "special" in category and self.language == "en"
-            result = self.model.inference(system_prompt, user_prompt, functions=functions, is_special_en=is_special_en)
-        else:
             result = self.model.inference(system_prompt, user_prompt)
         return result
 
